@@ -6,156 +6,127 @@ import java.time.Instant;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+// Clean LLD Implementation of the Composite Logger.
 public class CompositeLogger implements Logger {
 
-    private static final LogWorker LOG_WORKER =
-            new LogWorker();
-
+    private static final LogWorker LOG_WORKER = new LogWorker();
     private final String loggerName;
 
     public CompositeLogger(Class<?> clazz) {
-
         this.loggerName = clazz.getName();
     }
 
     @Override
-    public void debug(String message) {
-
-        log(LogLevel.DEBUG, message);
-    }
-
+    public void debug(String message) { log(LogLevel.DEBUG, message); }
     @Override
-    public void info(String message) {
-
-        log(LogLevel.INFO, message);
-    }
-
+    public void info(String message)  { log(LogLevel.INFO, message); }
     @Override
-    public void warn(String message) {
-
-        log(LogLevel.WARN, message);
-    }
-
+    public void warn(String message)  { log(LogLevel.WARN, message); }
     @Override
-    public void error(String message) {
+    public void error(String message) { log(LogLevel.ERROR, message); }
 
-        log(LogLevel.ERROR, message);
-    }
-
-    private void log(
-            LogLevel level,
-            String message
-    ) {
-
-        LogTask task = new LogTask(
-                level,
-                message,
-                loggerName,
-                Instant.now()
-        );
-
+    private void log(LogLevel level, String message) {
+        LogTask task = new LogTask(level, message, loggerName, Instant.now());
         LOG_WORKER.submit(task);
     }
 
     public static void shutdown() {
-        System.out.println("shutdown called...");
+        System.out.println("Shutdown initialized...");
         LOG_WORKER.shutdown();
     }
 
+    //Worker class managing target thread scopes asynchronously.
     public static class LogWorker {
-
         private static final int QUEUE_SIZE = 1000;
 
-        private final BlockingQueue<LogTask> consoleQueue =
-                new ArrayBlockingQueue<>(QUEUE_SIZE);
+        private final BlockingQueue<LogTask> consoleQueue = new ArrayBlockingQueue<>(QUEUE_SIZE);
+        private final BlockingQueue<LogTask> fileQueue    = new ArrayBlockingQueue<>(QUEUE_SIZE);
+        private final BlockingQueue<LogTask> dbQueue      = new ArrayBlockingQueue<>(QUEUE_SIZE);
 
-        private final BlockingQueue<LogTask> fileQueue =
-                new ArrayBlockingQueue<>(QUEUE_SIZE);
+        private final ConsoleLogger consoleLogger = new ConsoleLogger();
+        private final FileLogger fileLogger       = new FileLogger();
+        private final DbLogger dbLogger           = new DbLogger();
 
-        private final BlockingQueue<LogTask> dbQueue =
-                new ArrayBlockingQueue<>(QUEUE_SIZE);
+        private final Thread consoleThread;
+        private final Thread fileThread;
+        private final Thread dbThread;
 
-        private final ConsoleLogger consoleLogger =
-                new ConsoleLogger();
-
-        private final FileLogger fileLogger =
-                new FileLogger();
-
-        private final DbLogger dbLogger =
-                new DbLogger();
-
-        private final Thread consoleThread =
-                new Thread(
-                        this::processConsole,
-                        "console-log-worker"
-                );
-
-        private final Thread fileThread =
-                new Thread(
-                        this::processFile,
-                        "file-log-worker"
-                );
-
-        private final Thread dbThread =
-                new Thread(
-                        this::processDb,
-                        "db-log-worker"
-                );
-        //if false, no new log will be accepted
-        private volatile boolean acceptingLogs = true;
+        // for atomic update for flag set
+        private final AtomicBoolean acceptingLogs = new AtomicBoolean(true);
 
         public LogWorker() {
+            this.consoleThread = new Thread(this::processConsole, "console-log-worker");
+            this.fileThread    = new Thread(this::processFile, "file-log-worker");
+            this.dbThread      = new Thread(this::processDb, "db-log-worker");
+
             consoleThread.start();
             fileThread.start();
             dbThread.start();
         }
 
         public void submit(LogTask task) {
+            // warn that log is not getting accepted as shutdown has begun
+            if (!acceptingLogs.get()) {
+                System.err.println("[REJECTED] Cannot submit logs. Logger shutdown is active: " + task.message());
+                return;
+            }
 
-            consoleQueue.offer(task);
-            fileQueue.offer(task);
-            dbQueue.offer(task);
+            // Using offer checks bounds. True tracking would alert if memory buffers fill up.
+            if (!consoleQueue.offer(task)) System.err.println("[DROP] Console buffer capacity breached.");
+            if (!fileQueue.offer(task))    System.err.println("[DROP] File buffer capacity breached.");
+            if (!dbQueue.offer(task))      System.err.println("[DROP] Database buffer capacity breached.");
         }
 
         private void processConsole() {
-            try {
-
-                while (acceptingLogs || !consoleQueue.isEmpty()) {
+            // while acceptingLogs and console is not empty
+            while (acceptingLogs.get() || !consoleQueue.isEmpty()) {
+                try {
                     LogTask task = consoleQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task != null) consoleLogger.log(task);
+                    if (task != null) {
+                        consoleLogger.log(task);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
         }
 
         private void processFile() {
-            try {
-                while (acceptingLogs || !fileQueue.isEmpty()) {
+            while (acceptingLogs.get() || !fileQueue.isEmpty()) {
+                try {
                     LogTask task = fileQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task != null) fileLogger.log(task);
+                    if (task != null) {
+                        fileLogger.log(task);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
         }
 
         private void processDb() {
-            try {
-                while (acceptingLogs || !dbQueue.isEmpty()) {
+            while (acceptingLogs.get() || !dbQueue.isEmpty()) {
+                try {
                     LogTask task = dbQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task != null) dbLogger.log(task);
+                    if (task != null) {
+                        dbLogger.log(task);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
         }
 
         public void shutdown() {
-             //stop accepting new logs.
-            acceptingLogs = false;
-            //Wait for all workers to finish processing
+            //since acceptingLogs is Atomic, it instantly stop accept incoming logs in while loop of each log destination processing
+            acceptingLogs.set(false);
+
+            // Wait for workers to finish running logs safely
             try {
                 consoleThread.join();
                 fileThread.join();
@@ -163,6 +134,7 @@ public class CompositeLogger implements Logger {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            System.out.println("All asynchronous logger worker threads halted cleanly.");
         }
     }
 }
