@@ -34,7 +34,7 @@ Provide a simple API for application code to emit `DEBUG`, `INFO`, `WARN`, and `
 
 - Each destination has its own `ArrayBlockingQueue<LogTask>` with capacity 1,000. `ArrayBlockingQueue` safely transfers events between application threads and the corresponding worker thread.
 - Three dedicated threads poll their queues and process events independently, so a slow sink does not directly block the other sink workers.
-- The shared `acceptingLogs` flag is `volatile`, so workers observe the shutdown change. Shutdown sets it to `false` and joins all three threads; workers continue until their queues are empty.
+- The shared `acceptingLogs` flag is an `AtomicBoolean`. `submit` checks it before enqueueing, and each worker checks it while deciding whether to keep processing. Shutdown atomically sets it to `false` and joins all three threads; workers continue until their queues are empty.
 - `submit` uses non-blocking `offer` calls and currently ignores their return values. If a queue is full, that sink silently drops the event. Submission to the three queues is also not atomic, so an event can reach some sinks and be dropped by another.
 - The worker is shared statically across `CompositeLogger` instances and should be shut down once, after logging is finished. Calls made after shutdown are not rejected explicitly.
 
